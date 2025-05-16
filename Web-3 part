@@ -1,0 +1,1454 @@
+
+import logging
+import time
+import random
+import math
+import asyncio
+import traceback
+from datetime import datetime, timedelta
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes, CallbackQueryHandler
+from telegram.error import TimedOut, NetworkError
+try:
+   import pymongo
+   from bson import ObjectId
+   MONGODB_AVAILABLE = True
+except ImportError:
+   MONGODB_AVAILABLE = False
+   print("MongoDB support disabled - running in demo mode")
+
+# Налаштування логування
+logging.basicConfig(
+   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+   level=logging.INFO,
+   filename='bot_log.txt'
+)
+logger = logging.getLogger(__name__)
+
+# Діагностичний код
+print("=" * 50)
+print("ЗАПУСК MEN'S HEALTH TEST BOT З ІНТЕГРАЦІЄЮ SOLANA")
+print("Mode: Demo (No MongoDB required)")
+print("Web3 Features: Enabled (Solana DevNet)")
+print("=" * 50)
+
+# Токен бота
+TOKEN = "7773048753:AAG2gvPbz1sVqDXr_UjWBUonyFMIJyaarRA"  # Замініть на ваш токен
+MONGODB_URL = None  # Не використовуємо MongoDB у демо-режимі
+
+# Стани для ConversationHandler
+(NAME, AGE, GENDER, BODY_TYPE, HEIGHT, WEIGHT, QUESTIONS, PROCESSING, RESULTS, HORMONE_MENU,
+WALLET_VERIFICATION, WALLET_ADDRESS, WALLET_SIGNATURE, WALLET_CONFIRMATION) = range(14)
+
+# Додаємо моки для роботи без MongoDB
+class MockDBCollection:
+   """Mock для MongoDB колекції для демо-версії без реальної бази даних"""
+   def __init__(self):
+       self.data = {}
+
+   def find_one(self, query):
+       user_id = query.get('user_id')
+       if user_id and user_id in self.data:
+           return self.data[user_id]
+       return None
+
+   def update_one(self, query, update, upsert=False):
+       user_id = query.get('user_id')
+       if user_id:
+           if user_id not in self.data and upsert:
+               self.data[user_id] = {'user_id': user_id}
+
+           if user_id in self.data:
+               # Обробка $set
+               if '$set' in update:
+                   for key, value in update['$set'].items():
+                       self.data[user_id][key] = value
+
+               # Обробка $push
+               if '$push' in update:
+                   for key, value in update['$push'].items():
+                       if key not in self.data[user_id]:
+                           self.data[user_id][key] = []
+                       self.data[user_id][key].append(value)
+
+               return MockUpdateResult(1)
+       return MockUpdateResult(0)
+
+   def update_many(self, query, update, upsert=False):
+       # Для демо просто повертаємо результат з 0 модифікованих документів
+       return MockUpdateResult(0)
+
+   def insert_one(self, document):
+       user_id = document.get('user_id')
+       if user_id:
+           self.data[user_id] = document
+           return MockInsertOneResult()
+       return None
+
+   def delete_many(self, query):
+       # Для демо просто повертаємо результат з 0 видалених документів
+       return MockDeleteResult(0)
+
+class MockUpdateResult:
+   def __init__(self, count):
+       self.modified_count = count
+
+class MockInsertOneResult:
+   def __init__(self):
+       self.inserted_id = "mock_id"
+
+class MockDeleteResult:
+   def __init__(self, count):
+       self.deleted_count = count
+
+###########################################
+# Part 1: Solana Integration
+###########################################
+
+class PublicKey:
+   """Stub for PublicKey class from Solana"""
+   def __init__(self, value=None):
+       self.value = value
+
+   def __str__(self):
+       return f"PublicKey({self.value})"
+
+   @staticmethod
+   def find_program_address(seeds, program_id):
+       """Simulation of program address finding"""
+       return PublicKey(f"simulated_pda_for_{seeds}"), 255
+
+class Client:
+   """Stub for Client class from Solana"""
+   def __init__(self, url=None):
+       self.url = url
+
+   def get_account_info(self, pubkey):
+       """Simulation of getting account info"""
+       return {"result": {"value": None}}
+
+class SolanaIntegration:
+   def __init__(self):
+       """Initialization of Solana integration"""
+       try:
+           # Using devnet for development
+           self.client = Client("https://api.devnet.solana.com")
+           self.admin_public_key = "DKCejcctpyK4ivM3yQ1E13qSYnrbUej1KoxeYf3jwZQg"  # Your pubkey
+           self.enabled = True  # Is integration active
+           logger.info("Solana integration initialized with devnet (simulation mode)")
+       except Exception as e:
+           logger.error(f"Error initializing Solana integration: {e}", exc_info=True)
+           self.enabled = False
+           logger.info("Solana integration disabled due to initialization error")
+
+   async def verify_wallet_ownership(self, wallet_address, transaction_reference=None, verification_amount=None):
+       """Verification of wallet ownership via test transaction"""
+       try:
+           if not self.enabled:
+               logger.info(f"Wallet verification skipped (integration disabled)")
+               return True, "Wallet verification successful (integration disabled)"
+
+           # Симулюємо перевірку тестової транзакції для хакатону
+           logger.info(f"Simulating wallet verification for: {wallet_address}")
+
+           # Додаємо затримку для імітації мережевого запиту
+           await asyncio.sleep(0.2)
+
+           # Для реального рішення тут буде код для перевірки транзакції
+           # Наприклад:
+           # transaction = await self.client.get_transaction(transaction_reference)
+           # if transaction and transaction.sender == wallet_address and abs(transaction.amount - verification_amount) < 0.0000001:
+           #     return True, "Wallet verification successful"
+           # else:
+           #     return False, "Transaction verification failed"
+
+           # Для хакатону просто повертаємо успіх
+           return True, f"Wallet verification successful via test transaction (development mode)"
+       except Exception as e:
+           logger.error(f"Wallet verification failed: {e}", exc_info=True)
+           return False, f"Verification failed: {str(e)}"
+
+   async def send_bonus_tokens(self, recipient_wallet, token_amount=10):
+       """Sending bonus tokens to new user (simulation)"""
+       try:
+           if not self.enabled:
+               logger.info(f"Token sending skipped (integration disabled)")
+               return True, f"Tokens sent successfully (integration disabled)"
+
+           # Just simulating sending for now
+           logger.info(f"Simulating sending {token_amount} tokens to {recipient_wallet}")
+
+           # Додаємо затримку для імітації мережевого запиту
+           await asyncio.sleep(0.2)
+
+           # Later we'll replace with real token sending
+           return True, f"Successfully sent {token_amount} tokens (development mode)"
+       except Exception as e:
+           logger.error(f"Failed to send bonus tokens: {e}", exc_info=True)
+           return False, f"Failed to send tokens: {str(e)}"
+
+###########################################
+# Part 2: On-Chain Results Storage
+###########################################
+
+# Configuration
+HEALTH_TEST_PROGRAM_ID = "Your_Future_Program_ID"  # Will be replaced after contract deployment
+
+class OnChainResults:
+   def __init__(self, solana_integration):
+       """Initialization with existing Solana integration"""
+       try:
+           self.solana = solana_integration
+           self.client = solana_integration.client
+           self.enabled = solana_integration.enabled
+           logger.info("OnChainResults initialized successfully")
+       except Exception as e:
+           logger.error(f"Error initializing OnChainResults: {e}", exc_info=True)
+           self.enabled = False
+           self.solana = solana_integration
+           self.client = None
+           logger.info("OnChainResults disabled due to initialization error")
+
+   async def record_result_on_chain(self, user_id, test_results, user_wallet=None):
+       """Records health test result on blockchain (simulation)"""
+       try:
+           if not self.enabled:
+               logger.info("On-chain recording skipped (integration disabled)")
+               return False, "Blockchain integration is disabled"
+
+           # Simulating blockchain recording
+           logger.info(f"Simulating on-chain health test recording for user {user_id}")
+
+           # Додаємо затримку для імітації мережевого запиту
+           await asyncio.sleep(0.3)
+
+           # Generate fake transaction hash
+           simulated_tx_hash = f"simu1ated{user_id}{int(datetime.now().timestamp())}"
+           simulated_address = f"healthresult{user_id}"
+
+           return True, {
+               "transaction_hash": simulated_tx_hash,
+               "result_address": simulated_address,
+               "simulation_mode": True
+           }
+       except Exception as e:
+           logger.error(f"Failed to record result on-chain: {e}", exc_info=True)
+           return False, f"Error recording result: {str(e)}"
+
+   async def verify_result_on_chain(self, user_id):
+       """Verifies result existence on blockchain (simulation)"""
+       try:
+           if not self.enabled:
+               logger.info("On-chain verification skipped (integration disabled)")
+               return False, "Blockchain integration is disabled"
+
+           # Simulating blockchain verification
+           logger.info(f"Simulating on-chain health test verification for user {user_id}")
+
+           # Додаємо затримку для імітації мережевого запиту
+           await asyncio.sleep(0.2)
+
+           return True, {
+               "user_id": str(user_id),
+               "timestamp": int(datetime.now().timestamp()),
+               "simulation_mode": True
+           }
+       except Exception as e:
+           logger.error(f"Error verifying result on-chain: {e}", exc_info=True)
+           return False, f"Error verifying result: {str(e)}"
+
+###########################################
+# Part 3: Token System
+###########################################
+
+class TokenSystem:
+   def __init__(self, db=None):
+       """Ініціалізація токен системи (демо-режим)"""
+       try:
+           self.db = db
+           self.users = db.users if db else None
+           self.user_balances = {}  # Локальне зберігання балансів для демо
+           logger.info("Token system initialized in demo mode")
+       except Exception as e:
+           logger.error(f"Error initializing TokenSystem: {e}", exc_info=True)
+           self.users = None
+           logger.info("TokenSystem initialized with potential issues")
+
+   async def add_tokens(self, user_id, amount, reason="admin"):
+       """Додавання токенів до балансу користувача (демо-режим)"""
+       try:
+           # Отримуємо поточний баланс
+           current_balance = self.user_balances.get(user_id, 0)
+           new_balance = current_balance + amount
+
+           # Оновлюємо баланс
+           self.user_balances[user_id] = new_balance
+
+           logger.info(f"Added {amount} tokens to user {user_id}. New balance: {new_balance}")
+           return True, new_balance
+
+       except Exception as e:
+           logger.error(f"Error adding tokens: {e}", exc_info=True)
+           return False, f"Error: {str(e)}"
+
+   async def use_tokens(self, user_id, amount, feature):
+       """Використання токенів для преміум-функцій (демо-режим)"""
+       try:
+           # Отримуємо поточний баланс
+           current_balance = self.user_balances.get(user_id, 0)
+
+           # Перевіряємо чи достатньо токенів
+           if current_balance < amount:
+               logger.warning(f"Insufficient tokens: User {user_id} has only {current_balance} tokens, needed {amount}")
+               return False, f"Insufficient tokens: you have {current_balance}, needed {amount}"
+
+           # Оновлюємо баланс
+           new_balance = current_balance - amount
+           self.user_balances[user_id] = new_balance
+
+           logger.info(f"User {user_id} spent {amount} tokens on {feature}. New balance: {new_balance}")
+           return True, new_balance
+
+       except Exception as e:
+           logger.error(f"Error using tokens: {e}", exc_info=True)
+           return False, f"Error: {str(e)}"
+
+   async def get_token_balance(self, user_id):
+       """Отримання балансу токенів користувача (демо-режим)"""
+       try:
+           return self.user_balances.get(user_id, 0)
+       except Exception as e:
+           logger.error(f"Error getting token balance: {e}", exc_info=True)
+           return 0
+
+###########################################
+# Part 4: Update Schema
+###########################################
+
+def update_user_schema():
+   """Mock для оновлення схеми користувача - для демо-режиму"""
+   logger.info("Mock update_user_schema called in demo mode")
+   return True, "Demo mode: User schema would be updated in production"
+
+def update_results_schema():
+   """Mock для оновлення схеми результатів - для демо-режиму"""
+   logger.info("Mock update_results_schema called in demo mode")
+   return True, "Demo mode: Results schema would be updated in production"
+
+###########################################
+# Part 5: HealthTestBot with Web3 Integration
+###########################################
+
+class HealthTestBot:
+   def __init__(self, token, db_url=None):
+       try:
+           self.token = token
+           self.client = None
+           self.db = None
+           self.users = MockDBCollection()  # Використовуємо заглушку
+           self.test_results = MockDBCollection()  # Використовуємо заглушку
+           self.bot = None  # Буде встановлено пізніше
+
+           # Ініціалізація Web3 компонентів (будуть встановлені пізніше)
+           self.solana = None
+           self.onchain_results = None
+           self.token_system = None
+
+           logger.info("Working in demo mode without MongoDB")
+       except Exception as e:
+           logger.error(f"Error in bot initialization: {e}", exc_info=True)
+           raise
+
+   def set_bot(self, bot):
+       """Встановлення екземпляра бота після його створення"""
+       try:
+           self.bot = bot
+
+           # Ініціалізуємо Web3 компоненти
+           self.solana = SolanaIntegration()
+           self.onchain_results = OnChainResults(self.solana)
+           self.token_system = TokenSystem(self.db)
+           logger.info("Web3 components initialized successfully")
+       except Exception as e:
+           logger.error(f"Failed to initialize Web3 components: {e}", exc_info=True)
+           # Створюємо заглушки, щоб бот міг працювати без Web3
+           if not self.solana:
+               self.solana = SolanaIntegration()
+               self.solana.enabled = False
+           if not self.onchain_results:
+               self.onchain_results = OnChainResults(self.solana)
+               self.onchain_results.enabled = False
+           if not self.token_system:
+               self.token_system = TokenSystem(self.db)
+           logger.info("Created fallback Web3 components")
+
+   async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Початок реєстрації з пропозицією підключення гаманця"""
+       print(f"START COMMAND RECEIVED FROM USER: {update.effective_user.id}")
+       logger.info(f"Start command received from user: {update.effective_user.id}")
+
+       user_id = update.effective_user.id
+       logger.info(f"Start method called by user: {user_id}")
+
+       try:
+           # Очищення попередніх даних
+           delete_time = datetime.now()
+
+           self.users.update_many(
+               {"user_id": user_id},
+               {"$set": {"active": False, "deleted_at": delete_time}}
+           )
+
+           logger.info(f"Auto-reset for user {user_id}: marked inactive profile")
+
+       except Exception as e:
+           logger.error(f"Error during auto-reset in start command: {e}", exc_info=True)
+
+       # Очищаємо контекст користувача
+       context.user_data.clear()
+
+       # Зберігаємо username користувача
+       user = update.effective_user
+       if user.username:
+           context.user_data['username'] = user.username
+
+       # Перевіряємо чи інтеграція з Web3 активна
+       if hasattr(self, 'solana') and self.solana and self.solana.enabled:
+           # Пропонуємо Web3 інтеграцію
+           keyboard = [
+               [InlineKeyboardButton("✅ Connect Phantom Wallet (100 tokens bonus)", callback_data="connect_phantom")],
+               [InlineKeyboardButton("⏭️ Continue without wallet", callback_data="skip_wallet")]
+           ]
+           reply_markup = InlineKeyboardMarkup(keyboard)
+
+           await update.message.reply_text(
+               "🌟 *Special Offer!* 🌟\n\n"
+               "Connect your Phantom wallet and receive bonus tokens!\n"
+               "These tokens can be used for premium features in the bot.\n\n"
+               "What would you like to do?",
+               reply_markup=reply_markup,
+               parse_mode="Markdown"
+           )
+           return WALLET_VERIFICATION
+       else:
+           # Якщо Web3 інтеграція не активна, переходимо до звичайної реєстрації
+           logger.info(f"Skipping wallet verification for user {user_id} - Solana integration disabled")
+           return await self.start_registration_after_wallet(update, context)
+
+   async def handle_wallet_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Обробка колбеків для підключення гаманця через тестову транзакцію"""
+       query = update.callback_query
+       await query.answer()
+
+       try:
+           if query.data == "connect_phantom":
+               # Генеруємо унікальну суму для верифікаційної транзакції
+               user_id = update.effective_user.id
+               verification_amount = 0.000001 + (user_id % 1000) / 100000000  # Унікальна сума для кожного користувача
+               context.user_data['verification_amount'] = verification_amount
+
+               # Зберігаємо часову мітку для перевірки
+               context.user_data['verification_timestamp'] = int(datetime.now().timestamp())
+
+               # Отримуємо адресу для прийому тестової транзакції (в реальності це був би гаманець вашого сервісу)
+               receiver_address = "DKCejcctpyK4ivM3yQ1E13qSYnrbUej1KoxeYf3jwZQg"  # Адреса з вашого коду
+               context.user_data['receiver_address'] = receiver_address
+
+               # Відправляємо інструкції для тестової транзакції
+               await query.message.reply_text(
+                   "To verify your wallet ownership:\n\n"
+                   "1. Open your Phantom wallet\n"
+                   "2. Make sure you're in Devnet mode\n"
+                   "3. Send your wallet address here"
+               )
+               return WALLET_ADDRESS
+           elif query.data == "skip_wallet":
+               await query.message.reply_text(
+                   "You chose to continue without connecting a wallet.\n"
+                   "You can always connect it later in the settings."
+               )
+               # Запускаємо звичайну реєстрацію
+               return await self.start_registration_after_wallet(update, context)
+       except Exception as e:
+           logger.error(f"Error in handle_wallet_callback: {e}", exc_info=True)
+           # У разі помилки переходимо до звичайної реєстрації
+           await query.message.reply_text(
+               "An error occurred while connecting the wallet. Continuing without it."
+           )
+           return await self.start_registration_after_wallet(update, context)
+
+   async def handle_wallet_address(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Обробка введеної адреси гаманця та інструкції для тестової транзакції"""
+       try:
+           wallet_address = update.message.text.strip()
+           context.user_data['wallet_address'] = wallet_address
+
+           # Перевіряємо, чи має адреса правильний формат для Solana (base58, 32-44 символи)
+           if not (len(wallet_address) >= 32 and len(wallet_address) <= 44):
+               await update.message.reply_text(
+                   "❌ This doesn't look like a valid Solana wallet address.\n"
+                   "Please check and try again, or choose 'Skip'."
+               )
+               keyboard = [
+                   [InlineKeyboardButton("⏭️ Continue without wallet", callback_data="skip_wallet")]
+               ]
+               reply_markup = InlineKeyboardMarkup(keyboard)
+               await update.message.reply_text("Or skip this step:", reply_markup=reply_markup)
+               return WALLET_ADDRESS
+
+           # Генеруємо унікальну суму для верифікації (можна взяти з context.user_data)
+           verification_amount = context.user_data.get('verification_amount', 0.000001)
+           receiver_address = context.user_data.get('receiver_address', "DKCejcctpyK4ivM3yQ1E13qSYnrbUej1KoxeYf3jwZQg")
+
+           # Повідомляємо користувача про необхідність відправки тестової транзакції
+           await update.message.reply_text(
+               f"Wallet address received: `{wallet_address}`\n\n"
+               f"To verify ownership, please send a TEST transaction to:\n"
+               f"`{receiver_address}`\n\n"
+               f"Amount: `{verification_amount:.8f}` SOL\n\n"
+               f"After sending the transaction, type 'Done' or send the transaction hash.",
+               parse_mode="Markdown"
+           )
+
+           # Додаткові інструкції для отримання тестових SOL
+           await update.message.reply_text(
+               "If you don't have test SOL, you can get some from Solana Devnet Faucet:\n"
+               "https://solfaucet.com/"
+           )
+
+           return WALLET_SIGNATURE  # Тепер це буде підтвердження транзакції, а не підпис
+       except Exception as e:
+           logger.error(f"Error in handle_wallet_address: {e}", exc_info=True)
+           await update.message.reply_text(
+               "An error occurred while processing the wallet address. Continuing without connection."
+           )
+           return await self.start_registration_after_wallet(update, context)
+
+   async def verify_transaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Обробка підтвердження тестової транзакції замість підпису"""
+       try:
+           user_message = update.message.text.strip()
+           wallet_address = context.user_data.get('wallet_address')
+
+           # Для хакатону ми просто приймаємо будь-яке підтвердження
+           # В реальному додатку ми б перевіряли хеш транзакції
+           is_verified = True
+           message = "Test transaction verified"
+
+           if user_message.lower() == "done" or len(user_message) > 30:  # Простий хеврістичний підхід
+               # Перевіряємо транзакцію через SolanaIntegration
+               is_verified, message = await self.solana.verify_wallet_ownership(
+                   wallet_address,
+                   user_message if len(user_message) > 30 else None,  # Можливий хеш транзакції
+                   context.user_data.get('verification_amount')
+               )
+
+           if is_verified:
+               # Зберігаємо інформацію про гаманець у профілі користувача
+               context.user_data['wallet_verified'] = True
+               context.user_data['verified_wallet'] = wallet_address
+
+               user_id = update.effective_user.id
+               bonus_amount = 100  # Кількість бонусних токенів
+
+               await update.message.reply_text(
+                   "🎉 Congratulations! Your wallet has been successfully verified!\n\n"
+                   f"You will receive {bonus_amount} bonus tokens after completing registration!\n\n"
+                   "Now let's continue with registration."
+               )
+
+               # Переходимо до звичайної реєстрації
+               return await self.start_registration_after_wallet(update, context)
+           else:
+               await update.message.reply_text(
+                   "❌ Could not verify the transaction. Possible reasons:\n"
+                   "- Transaction not yet confirmed on the network\n"
+                   "- Wrong amount sent\n"
+                   "- Transaction sent from another wallet\n\n"
+                   "Would you like to try again or continue without a wallet?"
+               )
+               keyboard = [
+                   [InlineKeyboardButton("🔄 Try again", callback_data="connect_phantom")],
+                   [InlineKeyboardButton("⏭️ Continue without wallet", callback_data="skip_wallet")]
+               ]
+               reply_markup = InlineKeyboardMarkup(keyboard)
+               await update.message.reply_text("What would you like to do?", reply_markup=reply_markup)
+               return WALLET_VERIFICATION
+       except Exception as e:
+           logger.error(f"Error in verify_transaction: {e}", exc_info=True)
+           await update.message.reply_text(
+               "An error occurred during transaction verification. Continuing without wallet connection."
+           )
+           return await self.start_registration_after_wallet(update, context)
+
+   async def start_registration_after_wallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Починаємо звичайну реєстрацію після успішної верифікації гаманця"""
+       try:
+           # Привітальне повідомлення
+           await update.message.reply_text(
+               f"Welcome to *Men's Health Test Bot* 🧬\n\n"
+               f"This test is based on Dr. Braverman's methodology and includes an analysis of neurotransmitters and hormonal profile.\n\n"
+               f"I will help you assess the state of key neurochemical systems that affect your well-being, sleep, mood, energy, and cognitive abilities.\n\n"
+               f"After completing the test, you will receive:\n"
+               f"• Complete neurochemical profile 🧠\n"
+               f"• Detailed analysis of each neurotransmitter and its level\n"
+               f"• Personalized recommendations for balance optimization 💪\n"
+               f"• Understanding of the relationship between lifestyle and brain biochemistry\n\n"
+               f"To get the most accurate results, please answer the questions as honestly as possible.\n\n"
+               f"Let's start!",
+               parse_mode='Markdown'
+           )
+
+           # Питаємо ім'я
+           await update.message.reply_text(
+               "What is your name?",
+               reply_markup=ReplyKeyboardRemove()
+           )
+
+           return NAME
+       except Exception as e:
+           logger.error(f"Error in start_registration_after_wallet: {e}", exc_info=True)
+           # Якщо сталася помилка, все одно пробуємо почати реєстрацію
+           await update.message.reply_text(
+               "An error occurred, but let's continue with registration.\n"
+               "What is your name?",
+               reply_markup=ReplyKeyboardRemove()
+           )
+           return NAME
+
+   async def handle_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           context.user_data['name'] = update.message.text
+           logger.info(f"User {update.effective_user.id} provided name: {context.user_data['name']}")
+
+           # Питаємо про вік
+           keyboard = [
+               ["Under 25", "25-35"],
+               ["36-45", "46-60"],
+               ["60+"]
+           ]
+           await update.message.reply_text(
+               f"Nice to meet you, {context.user_data['name']}! Please indicate your age:",
+               reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+           )
+
+           return AGE
+       except Exception as e:
+           logger.error(f"Error in handle_name: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_age(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           context.user_data['age'] = update.message.text
+           logger.info(f"User {update.effective_user.id} provided age: {context.user_data['age']}")
+
+           # Питаємо про стать
+           keyboard = [["Male", "Female"]]
+           await update.message.reply_text(
+               "Please indicate your gender:",
+               reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+           )
+
+           return GENDER
+       except Exception as e:
+           logger.error(f"Error in handle_age: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_gender(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           context.user_data['gender'] = update.message.text
+           logger.info(f"User {update.effective_user.id} provided gender: {context.user_data['gender']}")
+
+           # Питаємо про тип статури
+           keyboard = [
+               ["Full", "Average"],
+               ["Athletic", "Slim"]
+           ]
+           await update.message.reply_text(
+               "What is your body type?",
+               reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+           )
+
+           return BODY_TYPE
+       except Exception as e:
+           logger.error(f"Error in handle_gender: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_body_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           context.user_data['body_type'] = update.message.text
+           logger.info(f"User {update.effective_user.id} provided body type: {context.user_data['body_type']}")
+
+           # Питаємо про зріст
+           await update.message.reply_text(
+               "Please enter your height in centimeters (e.g., 175):",
+               reply_markup=ReplyKeyboardRemove()
+           )
+
+           return HEIGHT
+       except Exception as e:
+           logger.error(f"Error in handle_body_type: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_height(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           height = int(update.message.text)
+           if height < 50 or height > 250:
+               await update.message.reply_text("Please enter a valid height in centimeters (e.g., 175):")
+               return HEIGHT
+
+           context.user_data['height'] = height
+           logger.info(f"User {update.effective_user.id} provided height: {height} cm")
+
+           # Питаємо про вагу
+           await update.message.reply_text(
+               "Please enter your weight in kilograms (e.g., 70):",
+               reply_markup=ReplyKeyboardRemove()
+           )
+
+           return WEIGHT
+
+       except ValueError:
+           await update.message.reply_text("Please enter a number. What is your height in centimeters?")
+           return HEIGHT
+       except Exception as e:
+           logger.error(f"Error in handle_height: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_weight(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           weight = float(update.message.text)
+           if weight < 20 or weight > 300:
+               await update.message.reply_text("Please enter a valid weight in kilograms (e.g., 70):")
+               return WEIGHT
+
+           context.user_data['weight'] = weight
+           logger.info(f"User {update.effective_user.id} provided weight: {weight} kg")
+
+           # Розрахувати ІМТ
+           height = context.user_data['height']
+           body_type = context.user_data['body_type']
+           bmi = self.calculate_bmi(weight, height)
+           bmi_category = self.get_bmi_category(bmi, body_type, weight)
+
+           context.user_data['bmi'] = bmi
+           context.user_data['bmi_category'] = bmi_category
+
+           # Повідомлення перед початком тесту з інформацією про ІМТ
+           await update.message.reply_text(
+               f"Thank you! Your Body Mass Index (BMI): *{bmi}* - *{bmi_category}*.\n\n"
+               f"Now we will proceed to evaluate your neurotransmitter and hormonal profile.\n\n"
+               f"I will ask a series of questions about your well-being, mood, energy, and cognitive functions. "
+               f"Please answer as honestly as possible to get accurate results.",
+               parse_mode='Markdown'
+           )
+
+           # Затримка перед початком тесту для кращого сприйняття
+           time.sleep(1)
+
+           # Для хакатону пропускаємо реальні запитання і відразу показуємо processing
+           await update.message.reply_text(
+               "📊 Starting neurochemical test...",
+           )
+
+           # Перейдемо до обробки результатів
+           return await self.process_results(update, context)
+
+       except ValueError:
+           await update.message.reply_text("Please enter a number. What is your weight in kilograms?")
+           return WEIGHT
+       except Exception as e:
+           logger.error(f"Error in handle_weight: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+   # Додаємо методи для розрахунку ІМТ
+   def calculate_bmi(self, weight, height):
+       try:
+           # Висота в метрах (приходить в см)
+           height_m = height / 100
+           # Формула ІМТ: вага (кг) / зріст² (м)
+           bmi = weight / (height_m * height_m)
+           return round(bmi, 1)
+       except Exception as e:
+           logger.error(f"Error in calculate_bmi: {e}")
+           return 0
+
+   def get_bmi_category(self, bmi, body_type, weight):
+       try:
+           if body_type == "Athletic":
+               if bmi < 18.5:
+                   return "Underweight"
+               elif bmi < 27:  # Розширений діапазон для спортсменів
+                   return "Normal weight"
+               elif bmi < 30 or weight < 100:
+                   return "Slight excess mass - may be related to muscle mass"
+               else:
+                   return "Excess weight - recommended to reduce"
+           else:
+               if bmi < 18.5:
+                   return "Underweight"
+               elif bmi < 25:
+                   return "Normal weight"
+               elif bmi < 30:
+                   return "Overweight - weight loss recommended"
+               else:
+                   return "Obesity - weight loss necessary for health"
+       except Exception as e:
+           logger.error(f"Error in get_bmi_category: {e}")
+           return "Unable to determine category"
+
+   # Імітація обробки результатів з Web3 інтеграцією
+   async def process_results(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           await update.message.reply_text(
+               "🧠 *Test completed!* Starting analysis of your neurochemical and hormonal profile...",
+               parse_mode='Markdown'
+           )
+
+           # Імітуємо процес обробки з кількома повідомленнями
+           processing_phrases = [
+               "Analyzing initial data...",
+               "Evaluating neurotransmitter levels...",
+               "Analyzing hormonal profile...",
+               "Calculating correlations between different systems...",
+               "Generating personalized recommendations...",
+               "Preparing to store results on Solana blockchain..."
+           ]
+
+           for phrase in processing_phrases[:3]:
+               time.sleep(random.uniform(1.0, 1.5))
+               await update.message.reply_text(f"{phrase}")
+
+           # Якщо користувач верифікував гаманець, показуємо повідомлення про запис результатів в блокчейн
+           if context.user_data.get('wallet_verified'):
+               time.sleep(1.5)
+               await update.message.reply_text(
+                   "🔗 Preparing to record test results on Solana blockchain for immutability and verification..."
+               )
+
+               # Імітуємо запис результатів в блокчейн
+               user_id = update.effective_user.id
+               wallet_address = context.user_data.get('verified_wallet')
+
+               # Створюємо мок результатів тесту
+               test_results = {
+                   "user_id": user_id,
+                   "timestamp": datetime.now().isoformat(),
+                   "bmi": context.user_data.get('bmi', 0),
+                   "neurotransmitters": {
+                       "serotonin": 65,
+                       "dopamine": 78,
+                       "acetylcholine": 55,
+                       "gaba": 82,
+                       "noradrenaline": 70
+                   },
+                   "hormones": {
+                       "testosterone": 72,
+                       "estradiol": 48,
+                       "cortisol": 65
+                   }
+               }
+
+               # Запис результатів в блокчейн (симуляція)
+               success, result = await self.onchain_results.record_result_on_chain(
+                   user_id,
+                   test_results,
+                   wallet_address
+               )
+
+               if success:
+                   time.sleep(1.0)
+                   await update.message.reply_text(
+                       f"✅ Test results successfully recorded on Solana blockchain!\n"
+                       f"Transaction hash: `{result.get('transaction_hash')}`",
+                       parse_mode="Markdown"
+                   )
+
+                   # Зберігаємо хеш транзакції для подальшого використання
+                   context.user_data['transaction_hash'] = result.get('transaction_hash')
+
+                   # Нарахування бонусних токенів за проходження тесту
+                   bonus_amount = 50
+                   token_success, balance = await self.token_system.add_tokens(
+                       user_id,
+                       bonus_amount,
+                       "test_completion_bonus"
+                   )
+
+                   if token_success:
+                       time.sleep(0.5)
+                       await update.message.reply_text(
+                           f"🎁 You have been awarded {bonus_amount} tokens for completing the test!\n"
+                           f"Current balance: {balance} tokens"
+                       )
+
+           # Додаємо ще кілька фраз обробки
+           for phrase in processing_phrases[3:]:
+               time.sleep(random.uniform(1.0, 1.5))
+               await update.message.reply_text(f"{phrase}")
+
+           # Невелика затримка перед показом результатів
+           time.sleep(1.0)
+
+           # Показуємо результати
+           return await self.show_results(update, context)
+       except Exception as e:
+           logger.error(f"Error in process_results: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred while processing results. Please try again /start")
+           return ConversationHandler.END
+
+   # Показ результатів - розбитий на кілька повідомлень
+   async def show_results(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+       try:
+           name = context.user_data.get('name', 'User')
+           bmi = context.user_data.get('bmi', 0)
+           bmi_category = context.user_data.get('bmi_category', 'Not defined')
+           body_type = context.user_data.get('body_type', 'Not defined')
+
+           # Створюємо мок результатів для тестування
+           scores = {
+               'serotonin': 65,
+               'dopamine': 78,
+               'acetylcholine': 55,
+               'gaba': 82,
+               'noradrenaline': 70,
+               'testosterone': 72,
+               'estradiol': 48,
+               'cortisol': 65,
+               'liver': 60,
+               'sleep': 75
+           }
+
+           # Імітуємо максимальні бали для кожного показника
+           max_scores = {key: 100 for key in scores}
+
+           # Повідомлення 1: Заголовок та антропометричні дані
+           result_text = f"🔬 *NEUROCHEMICAL PROFILE RESULTS* 🔬\n\n"
+           result_text += f"*{name}, here is your personalized analysis:*\n\n"
+           result_text += f"*ANTHROPOMETRIC DATA:*\n"
+           result_text += f"• Body type: {body_type}\n"
+           result_text += f"• Body Mass Index (BMI): {bmi} - {bmi_category}\n\n"
+
+           await update.message.reply_text(result_text, parse_mode='Markdown')
+
+           # Повідомлення 2: Нейромедіаторний профіль
+           result_text = "*NEUROTRANSMITTER PROFILE:*\n\n"
+
+           neurotransmitters = ['serotonin', 'dopamine', 'acetylcholine', 'gaba', 'noradrenaline']
+           descriptions = {
+               'serotonin': 'Regulates mood, sleep, appetite, feeling of satisfaction and social behavior',
+               'dopamine': 'Responsible for motivation, reward, focus and ability to feel pleasure',
+               'acetylcholine': 'Important for memory, learning, creativity and mental activity',
+               'gaba': 'The main inhibitory neurotransmitter that provides calm, relaxation and sleep',
+               'noradrenaline': 'Regulates energy, attention, reaction speed and ability to cope with stress'
+           }
+
+           for nt in neurotransmitters:
+               percentage = scores.get(nt, 0)
+               if percentage >= 75:
+                   level = "🟢 Excellent"
+               elif percentage >= 50:
+                   level = "🟡 Normal"
+               elif percentage >= 25:
+                   level = "🟠 Needs attention"
+               else:
+                   level = "🔴 Critical"
+
+               level_bar = "▓" * int(percentage / 10) + "░" * (10 - int(percentage / 10))
+
+               result_text += f"*{nt.capitalize()}*: {level}\n"
+               result_text += f"{level_bar} {int(percentage)}%\n"
+               result_text += f"_{descriptions.get(nt, 'No description available')}_\n\n"
+
+           await update.message.reply_text(result_text, parse_mode='Markdown')
+
+           # Повідомлення 3: Гормональний профіль
+           result_text = "*HORMONAL PROFILE:*\n\n"
+
+           hormones = ['testosterone', 'estradiol', 'cortisol']
+           hormone_descriptions = {
+               'testosterone': 'Responsible for muscle mass, libido, energy, motivation and dominance',
+               'estradiol': 'Regulates gender characteristics, reproductive function, mood and cognitive abilities',
+               'cortisol': 'Regulates energy, stress response, immunity and inflammatory processes in the body'
+           }
+
+           for h in hormones:
+               percentage = scores.get(h, 0)
+               if percentage >= 75:
+                   level = "🟢 Excellent"
+               elif percentage >= 50:
+                   level = "🟡 Normal"
+               elif percentage >= 25:
+                   level = "🟠 Needs attention"
+               else:
+                   level = "🔴 Critical"
+
+               level_bar = "▓" * int(percentage / 10) + "░" * (10 - int(percentage / 10))
+
+               result_text += f"*{h.capitalize()}*: {level}\n"
+               result_text += f"{level_bar} {int(percentage)}%\n"
+               result_text += f"_{hormone_descriptions.get(h, 'No description available')}_\n\n"
+
+           await update.message.reply_text(result_text, parse_mode='Markdown')
+
+           # Повідомлення 4: Системний профіль
+           result_text = "*SYSTEM PROFILE:*\n\n"
+
+           systems = ['liver', 'sleep']
+           system_descriptions = {
+               'liver': 'Responsible for blood purification, hormone processing, detoxification and metabolism of nutrients',
+               'sleep': 'Provides recovery of the nervous system, tissue regeneration and hormone balancing'
+           }
+
+           for s in systems:
+               percentage = scores.get(s, 0)
+               if percentage >= 75:
+                   level = "🟢 Excellent"
+               elif percentage >= 50:
+                   level = "🟡 Normal"
+               elif percentage >= 25:
+                   level = "🟠 Needs attention"
+               else:
+                   level = "🔴 Critical"
+
+               level_bar = "▓" * int(percentage / 10) + "░" * (10 - int(percentage / 10))
+
+               result_text += f"*{s.capitalize()}*: {level}\n"
+               result_text += f"{level_bar} {int(percentage)}%\n"
+               result_text += f"_{system_descriptions.get(s, 'No description available')}_\n\n"
+
+           await update.message.reply_text(result_text, parse_mode='Markdown')
+
+           # Повідомлення 5: Рекомендації
+           result_text = "*RECOMMENDATIONS:*\n\n"
+
+           # Додаємо базові рекомендації для якогось нейромедіатора з низьким рівнем
+           deficient_nt = 'acetylcholine'  # Просто для прикладу
+
+           result_text += f"*FOR NEUROTRANSMITTER BALANCE:*\n"
+           recommendations = [
+               "Increase consumption of eggs, liver and vegetables",
+               "Practice new skills and mental exercises",
+               "Regularly read and solve puzzles",
+               "Eggs, liver, lecithin, seafood",
+               "Vitamins: B1, B5 (pantothenic acid), Omega-3"
+           ]
+
+           for i, recommendation in enumerate(recommendations):
+               if i < 4:  # Показуємо тільки перші 4 рекомендації в базовому звіті
+                   result_text += f"• {recommendation}\n"
+
+           result_text += "\n"
+
+           # Додаємо базові рекомендації для гормону
+           deficient_hormone = 'testosterone'  # Просто для прикладу
+
+           result_text += f"*FOR HORMONAL BALANCE:*\n"
+           hormone_recommendations = [
+               "Include strength training in your routine (3-4 times per week)",
+               "Ensure proper sleep (7-8 hours)",
+               "Enrich diet with zinc (pumpkin seeds, oysters) and magnesium",
+               "Vitamin D3 (up to 4000 IU, especially in winter)",
+               "Zinc (15-30 mg)",
+               "Magnesium (citrate/glycinate)"
+           ]
+
+           for i, recommendation in enumerate(hormone_recommendations):
+               if i < 4:  # Показуємо тільки перші 4 рекомендації в базовому звіті
+                   result_text += f"• {recommendation}\n"
+
+           await update.message.reply_text(result_text, parse_mode='Markdown')
+
+           # Повідомлення 6: Фінальна пропозиція та кнопки
+           premium_features_text = """
+*PREMIUM FEATURES AVAILABLE WITH TOKENS:*
+
+🔸 Detailed results analysis stored on blockchain
+🔸 Extended recommendations program
+🔸 Weekly monitoring of your neurochemical profile
+🔸 Personal consultation with a specialist
+"""
+
+           # Перевіряємо чи є у користувача гаманець
+           wallet_verified = context.user_data.get('wallet_verified', False)
+           token_balance = 0
+
+           # Отримуємо баланс токенів, якщо гаманець верифікований
+           if wallet_verified:
+               user_id = update.effective_user.id
+               token_balance = await self.token_system.get_token_balance(user_id)
+
+           if wallet_verified:
+               result_text = f"*YOUR RESULTS ARE SAFELY STORED ON BLOCKCHAIN*\n\n"
+               result_text += f"📊 Your results have been recorded on Solana blockchain for future reference and comparison.\n\n"
+               result_text += f"💰 Your token balance: {token_balance} tokens\n\n"
+               result_text += premium_features_text
+
+               # Додаємо кнопки для використання токенів
+               keyboard = [
+                   [InlineKeyboardButton("📊 Extended Analysis (50 tokens)", callback_data="extended_analysis")],
+                   [InlineKeyboardButton("🧪 Recommended Tests (30 tokens)", callback_data="recommended_tests")],
+                   [InlineKeyboardButton("👨‍⚕️ Specialist Consultation", url="https://t.me/vladyslav_kravchukk")]
+               ]
+           else:
+               result_text = "*CONNECT WALLET TO UNLOCK PREMIUM FEATURES*\n\n"
+               result_text += "🔒 Connect your wallet to store your results on blockchain and access premium features.\n\n"
+               result_text += premium_features_text
+
+               # Додаємо кнопки для підключення гаманця
+               keyboard = [
+                   [InlineKeyboardButton("🔗 Connect Wallet", callback_data="connect_phantom")],
+                   [InlineKeyboardButton("👨‍⚕️ Specialist Consultation", url="https://t.me/vladyslav_kravchukk")]
+               ]
+
+           reply_markup = InlineKeyboardMarkup(keyboard)
+
+           # Відправка фінального повідомлення з кнопками
+           await update.message.reply_text(result_text, parse_mode='Markdown', reply_markup=reply_markup)
+
+           # Якщо користувач верифікував гаманець, додаємо кнопку для перегляду транзакції в Solana Explorer
+           if wallet_verified and context.user_data.get('transaction_hash'):
+               # Отримуємо хеш транзакції з попереднього запису результатів
+               tx_hash = context.user_data.get('transaction_hash')
+
+               explorer_keyboard = [
+                   [InlineKeyboardButton("🔍 View Transaction in Solana Explorer", url=f"https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")]
+               ]
+               explorer_markup = InlineKeyboardMarkup(explorer_keyboard)
+
+               await update.message.reply_text(
+                   "You can view your test results transaction on Solana Explorer:",
+                   reply_markup=explorer_markup
+               )
+
+           return ConversationHandler.END
+       except Exception as e:
+           logger.error(f"Error in show_results: {e}", exc_info=True)
+           await update.message.reply_text("An error occurred while displaying results. Please try again /start")
+           return ConversationHandler.END
+
+   async def handle_result_buttons(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+       """Обробка натискань на кнопки результатів"""
+       try:
+           query = update.callback_query
+           await query.answer()
+
+           if query.data == "extended_analysis":
+               # Перевіряємо баланс користувача
+               user_id = update.effective_user.id
+               token_balance = await self.token_system.get_token_balance(user_id)
+               token_cost = 50
+
+               if token_balance >= token_cost:
+                   # Списуємо токени
+                   success, new_balance = await self.token_system.use_tokens(
+                       user_id,
+                       token_cost,
+                       "extended_analysis"
+                   )
+
+                   if success:
+                       await query.message.reply_text(
+                           f"🔍 *EXTENDED ANALYSIS PURCHASED*\n\n"
+                           f"Your extended analysis is being generated and will be stored on the blockchain.\n\n"
+                           f"💰 {token_cost} tokens have been deducted from your balance.\n"
+                           f"Current balance: {new_balance} tokens",
+                           parse_mode="Markdown"
+                       )
+
+                       # Імітуємо запис розширеного аналізу в блокчейн
+                       time.sleep(1.5)
+
+                       # Відправка розширеного аналізу
+                       extended_analysis = """
+*DETAILED NEUROTRANSMITTER AND HORMONE ANALYSIS*
+
+*SEROTONIN: 65% (Normal)*
+• Moderate stress resilience
+• Good baseline mood with normal fluctuations
+• Normal sleep cycle with occasional disruptions
+• Recommended supplements: 5-HTP, Vitamin B6, Magnesium
+
+*DOPAMINE: 78% (Good)*
+• Strong motivation and focus
+• Good reward response
+• Healthy pleasure appreciation
+• Recommended support: Regular exercise, Tyrosine-rich foods
+
+*ACETYLCHOLINE: 55% (Needs attention)*
+• Slight memory and recall issues
+• Moderate learning efficiency
+• Good mental flexibility
+• Recommended: Alpha GPC, Huperzine A, Phosphatidylcholine
+
+*GABA: 82% (Excellent)*
+• Excellent stress management
+• Good emotional control
+• Healthy sleep quality
+• No specific intervention needed
+
+*NORADRENALINE: 70% (Normal)*
+• Appropriate energy levels
+• Normal stress response
+• Good alertness
+• Recommended: Regular interval training
+
+*TESTOSTERONE: 72% (Good)*
+• Good muscle development potential
+• Healthy libido
+• Strong energy levels
+• Recommended: ZMA, Vitamin D3, Strength training
+
+*ESTRADIOL: 48% (Needs attention)*
+• Slight hormonal imbalance
+• Moderate mood stability
+• Consider: DIM, Calcium D-Glucarate
+
+*CORTISOL: 65% (Normal)*
+• Normal daily energy pattern
+• Appropriate stress response
+• Occasionally elevated evening levels
+• Recommended: Ashwagandha, Phosphatidylserine
+
+📊 This analysis was verified and stored on the Solana blockchain for future reference and comparison.
+"""
+                       await query.message.reply_text(extended_analysis, parse_mode="Markdown")
+
+                       # Імітуємо запис результатів в блокчейн
+                       tx_hash = f"simu1ated{user_id}extended{int(datetime.now().timestamp())}"
+
+                       # Додаємо кнопку для перегляду транзакції
+                       explorer_keyboard = [
+                           [InlineKeyboardButton("🔍 View Extended Analysis Transaction", url=f"https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")]
+                       ]
+                       explorer_markup = InlineKeyboardMarkup(explorer_keyboard)
+
+                       await query.message.reply_text(
+                           "✅ Your extended analysis has been successfully stored on Solana blockchain!",
+                           reply_markup=explorer_markup
+                       )
+                   else:
+                       await query.message.reply_text(
+                           f"❌ Failed to process tokens. Please try again later."
+                       )
+               else:
+                   await query.message.reply_text(
+                       f"❌ Insufficient tokens. You have {token_balance} tokens, but need {token_cost}.\n\n"
+                       f"Consider connecting your wallet to receive bonus tokens."
+                   )
+
+           elif query.data == "recommended_tests":
+               # Перевіряємо баланс користувача
+               user_id = update.effective_user.id
+               token_balance = await self.token_system.get_token_balance(user_id)
+               token_cost = 30
+
+               if token_balance >= token_cost:
+                   # Списуємо токени
+                   success, new_balance = await self.token_system.use_tokens(
+                       user_id,
+                       token_cost,
+                       "recommended_tests"
+                   )
+
+                   if success:
+                       await query.message.reply_text(
+                           f"🧪 *RECOMMENDED TESTS PURCHASED*\n\n"
+                           f"Your personalized test recommendations are being generated.\n\n"
+                           f"💰 {token_cost} tokens have been deducted from your balance.\n"
+                           f"Current balance: {new_balance} tokens",
+                           parse_mode="Markdown"
+                       )
+
+                       # Імітуємо генерацію рекомендацій
+                       time.sleep(1.5)
+
+                       # Відправка рекомендованих тестів
+                       recommended_tests = """
+*RECOMMENDED LABORATORY TESTS*
+
+Based on your neurochemical profile, we recommend the following laboratory tests:
+
+*BASIC TESTS:*
+• Complete Blood Count (CBC)
+• Comprehensive Metabolic Panel (CMP)
+• Lipid Panel
+• HbA1c
+
+*HORMONE PANEL:*
+• Total and Free Testosterone
+• Estradiol
+• SHBG (Sex Hormone Binding Globulin)
+• DHT (Dihydrotestosterone)
+• Prolactin
+• Cortisol (preferably 4-point saliva test)
+
+*THYROID PANEL:*
+• TSH, Free T3, Free T4
+• Reverse T3
+• Thyroid Antibodies
+
+*VITAMIN & MINERAL STATUS:*
+• Vitamin D - 25(OH)D
+• Vitamin B12 & Folate
+• Magnesium (RBC)
+• Zinc & Copper
+
+*INFLAMMATION MARKERS:*
+• hsCRP
+• Homocysteine
+• Ferritin
+
+These tests will provide comprehensive information about your metabolic, hormonal, and nutritional status, allowing for precise optimization of your health.
+
+📊 This recommendation was stored on the Solana blockchain for future reference.
+"""
+                       await query.message.reply_text(recommended_tests, parse_mode="Markdown")
+
+                       # Імітуємо запис результатів в блокчейн
+                       tx_hash = f"simu1ated{user_id}tests{int(datetime.now().timestamp())}"
+
+                       # Додаємо кнопку для перегляду транзакції
+                       explorer_keyboard = [
+                           [InlineKeyboardButton("🔍 View Recommendation Transaction", url=f"https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")]
+                       ]
+                       explorer_markup = InlineKeyboardMarkup(explorer_keyboard)
+
+                       await query.message.reply_text(
+                           "✅ Your test recommendations have been successfully stored on Solana blockchain!",
+                           reply_markup=explorer_markup
+                       )
+                   else:
+                       await query.message.reply_text(
+                           f"❌ Failed to process tokens. Please try again later."
+                       )
+               else:
+                   await query.message.reply_text(
+                       f"❌ Insufficient tokens. You have {token_balance} tokens, but need {token_cost}.\n\n"
+                       f"Consider connecting your wallet to receive bonus tokens."
+                   )
+
+           elif query.data == "connect_phantom":
+               # Перенаправляємо на верифікацію гаманця
+               await query.message.reply_text(
+                   "To connect your Phantom wallet, please restart the bot with /start command."
+               )
+
+           return ConversationHandler.END
+
+       except Exception as e:
+           logger.error(f"Error in handle_result_buttons: {e}", exc_info=True)
+           await query.message.reply_text("An error occurred. Please try again /start")
+           return ConversationHandler.END
+
+# Простий тестовий обробник команди для перевірки роботи бота
+async def test_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   print("TEST START COMMAND RECEIVED")
+   logger.info("Test start command received")
+   await update.message.reply_text("Bot is working! Test response.")
+
+# Функція для обробки скасування
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+   await update.message.reply_text(
+       "Operation cancelled. To start again, use /start command"
+   )
+   return ConversationHandler.END
+
+# Обробник помилок
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+   logger.error(f"Error occurred: {context.error}")
+   try:
+       if update and isinstance(update, Update) and update.effective_message:
+           await update.effective_message.reply_text(
+               "An error occurred during the command execution. Please try again /start"
+           )
+   except Exception as e:
+       logger.error(f"Error while handling error: {e}")
+
+###########################################
+# Main Code
+###########################################
+
+def main():
+   """Запуск бота з Web3 інтеграцією - демо-режим для хакатону"""
+   print("Starting main() function")
+
+   try:
+       # Оновлення схеми бази даних для підтримки Web3
+       print("Simulating database schema updates...")
+       users_success, users_message = update_user_schema()
+       results_success, results_message = update_results_schema()
+
+       print(f"User update: {users_success}, {users_message}")
+       print(f"Results update: {results_success}, {results_message}")
+
+       # Створення екземпляра бота
+       print("Creating bot in demo mode...")
+       bot_handler = HealthTestBot(TOKEN)
+
+       # Створення application
+       application = ApplicationBuilder().token(TOKEN).build()
+
+       # Встановлюємо екземпляр бота
+       bot_handler.set_bot(application.bot)
+
+       # Додавання тестового обробника
+       application.add_handler(CommandHandler('test', test_start))
+
+       # Створення обробника розмови з додаванням Web3 станів
+       print("Creating ConversationHandler...")
+       conv_handler = ConversationHandler(
+           entry_points=[CommandHandler('start', bot_handler.start)],
+           states={
+               WALLET_VERIFICATION: [
+                   CallbackQueryHandler(bot_handler.handle_wallet_callback)
+               ],
+               WALLET_ADDRESS: [
+                   MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_wallet_address),
+                   CallbackQueryHandler(bot_handler.handle_wallet_callback)
+               ],
+               WALLET_SIGNATURE: [
+                   MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.verify_transaction)
+               ],
+               NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_name)],
+               AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_age)],
+               GENDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_gender)],
+               BODY_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_body_type)],
+               HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_height)],
+               WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.handle_weight)],
+               PROCESSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.process_results)],
+               RESULTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handler.show_results)],
+               HORMONE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: cancel(update, context))],
+           },
+           fallbacks=[CommandHandler('cancel', cancel)]
+       )
+
+       # Додавання обробників
+       print("Adding handlers...")
+       application.add_handler(conv_handler)
+       application.add_handler(CallbackQueryHandler(bot_handler.handle_result_buttons))
+       application.add_error_handler(error_handler)
+
+       # Запуск бота з явним timeout
+       print("Starting bot in demo mode...")
+       logger.info("Starting Men's Health Test Bot with Web3 integration...")
+       application.run_polling(timeout=30, poll_interval=1.0)
+   except Exception as e:
+       print(f"Critical error in main(): {e}")
+       import traceback
+       traceback.print_exc()
+
+if __name__ == "__main__":
+   try:
+       print("Starting program...")
+       main()
+   except Exception as e:
+       print(f"CRITICAL ERROR: {str(e)}")
+       import traceback
+       traceback.print_exc()
